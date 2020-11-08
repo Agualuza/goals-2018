@@ -28,16 +28,11 @@ import "labrpc"
 
 // import "bytes"
 // import "encoding/gob"
-const (
-	c0 = iota
-	c1
-	c2
-)
 
 var states = map[string]int{
-	"leader": c0,
-	"candidate": c1,
-	"follower": c2,
+	"leader": 0,
+	"candidate": 1,
+	"follower": 2,
 }
 
 const HEARTBEATS = 100 * time.Microsecond
@@ -266,10 +261,21 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 			return ok
 		}
 
-		halfPeers := len(rf.peers) / 2
-		if (rf.state == states["candidate"]) && (rf.voteCount > halfPeers) {
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
 			rf.state = states["follower"]
-			rf.chanLeader <- true
+			rf.votedFor = -1
+		}
+
+		if reply.VoteGranted {
+			rf.voteCount++
+			halfPeers := len(rf.peers) / 2
+
+			if (rf.state == states["candidate"]) && (rf.voteCount > halfPeers) {
+				rf.state = states["follower"]
+				rf.chanLeader <- true
+			}
+
 		}
 	}
 
@@ -397,6 +403,59 @@ func (rf *Raft) run() {
 			}
 		}
 	}
+}
+
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+	reply.Success = false
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.NextIndex = rf.log[len(rf.log)-1].Id + 1
+		return
+	}
+	rf.chanHeartbeat <- true
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.state = states["follower"]
+		rf.votedFor = -1
+	}
+	reply.Term = args.Term
+	if args.PrevLogIndex > rf.log[len(rf.log)-1].Id {
+		reply.NextIndex = rf.log[len(rf.log)-1].Id + 1
+		return
+	}
+	baseIndex := rf.log[0].Id
+	if args.PrevLogIndex > baseIndex {
+		term := rf.log[args.PrevLogIndex-baseIndex].Term
+		if args.PrevLogTerm != term {
+			for i := args.PrevLogIndex - 1; i >= baseIndex; i-- {
+				if rf.log[i-baseIndex].Term != term {
+					reply.NextIndex = i + 1
+					break
+				}
+			}
+			return
+		}
+	}
+	if args.PrevLogIndex >= baseIndex {
+		rf.log = rf.log[:args.PrevLogIndex+1-baseIndex]
+		rf.log = append(rf.log, args.Entries...)
+		reply.Success = true
+		reply.NextIndex = rf.log[len(rf.log)-1].Id + 1
+	}
+	if args.LeaderCommit > rf.commitIndex {
+		last := rf.log[len(rf.log)-1].Id
+		if args.LeaderCommit > last {
+			rf.commitIndex = last
+		} else {
+			rf.commitIndex = args.LeaderCommit
+		}
+		rf.chanCommit <- true
+	}
+	return
 }
 
 func (rf *Raft) appendEntries() {
@@ -549,6 +608,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	rf.readSnapshot(persister.ReadSnapshot())
+
+	go rf.run()
 
 	go func() {
 		for {
