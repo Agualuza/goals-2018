@@ -85,14 +85,16 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
-
+	rf.mu.Lock()
 	term = rf.currentTerm
 	isleader = true
+
 
 	if rf.state != states["leader"] {
 		isleader = false
 	}
 
+	rf.mu.Unlock()
 	return term, isleader
 }
 
@@ -189,8 +191,8 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
 	defer rf.persist()
 
 	reply.VoteGranted = false
@@ -199,9 +201,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = rf.currentTerm
 		return
 	} else if args.Term > rf.currentTerm {
+		rf.mu.Lock()
 		rf.currentTerm = args.Term
 		rf.state = states["follower"]
 		rf.votedFor = -1
+		rf.mu.Unlock()
 	}
 
 	reply.Term = rf.currentTerm
@@ -214,10 +218,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	if updated && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
+		rf.mu.Lock()
 		rf.chanGrantVote <- true
 		rf.state = states["follower"]
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
+		rf.mu.Unlock()
 	}
 
 }
@@ -372,8 +378,10 @@ func (rf *Raft) run() {
 			select {
 			case <-rf.chanHeartbeat:
 			case <-rf.chanGrantVote:
-			case <-time.After(time.Duration(rand.Int63()%103+500) * time.Millisecond): //random re-elect time
+			case <-time.After(time.Duration(rand.Int63()%103+500) * time.Millisecond):
+				rf.mu.Lock()
 				rf.state = states["candidate"]
+				rf.mu.Unlock()
 			}
 		case states["leader"]:
 			rf.appendEntries()
